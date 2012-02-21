@@ -1039,20 +1039,21 @@ class Popen(object):
 
             # Start the process
             try:
-                hp, ht, pid, tid = _subprocess.CreateProcess(executable, args,
-                                         # no special security
-                                         None, None,
-                                         int(not close_fds),
-                                         creationflags,
-                                         env,
-                                         cwd,
-                                         startupinfo)
-            except pywintypes.error, e:
-                # Translate pywintypes.error to WindowsError, which is
-                # a subclass of OSError.  FIXME: We should really
-                # translate errno using _sys_errlist (or similar), but
-                # how can this be done from Python?
-                raise WindowsError(*e.args)
+                try:
+                    hp, ht, pid, tid = _subprocess.CreateProcess(executable, args,
+                                             # no special security
+                                             None, None,
+                                             int(not close_fds),
+                                             creationflags,
+                                             env,
+                                             cwd,
+                                             startupinfo)
+                except pywintypes.error, e:
+                    # Translate pywintypes.error to WindowsError, which is
+                    # a subclass of OSError.  FIXME: We should really
+                    # translate errno using _sys_errlist (or similar), but
+                    # how can this be done from Python?
+                    raise WindowsError(*e.args)
             finally:
                 # Child is launched. Close the parent's copy of those pipe
                 # handles that only the child should have open.  You need
@@ -1242,18 +1243,26 @@ class Popen(object):
                     errread, errwrite)
 
 
+        if hasattr(os, 'closerange'):  # Introduced in 2.6
+            @staticmethod
+            def _closerange(fd_low, fd_high):
+                os.closerange(fd_low, fd_high)
+        else:
+            @staticmethod
+            def _closerange(fd_low, fd_high):
+                for fd in xrange(fd_low, fd_high):
+                    while True:
+                        try:
+                            os.close(fd)
+                        except (OSError, IOError), e:
+                            if e.errno == errno.EINTR:
+                                continue
+                            break
+
+
         def _close_fds(self, but):
-            if hasattr(os, 'closerange'):
-                os.closerange(3, but)
-                os.closerange(but + 1, MAXFD)
-            else:
-                for i in xrange(3, MAXFD):
-                    if i == but:
-                        continue
-                    try:
-                        os.close(i)
-                    except:
-                        pass
+            self._closerange(3, but)
+            self._closerange(but + 1, MAXFD)
 
 
         def _close_all_but_a_sorted_few_fds(self, fds_to_keep):
@@ -1261,10 +1270,10 @@ class Popen(object):
             start_fd = 3
             for fd in fds_to_keep:
                 if fd >= start_fd:
-                    os.closerange(start_fd, fd)
+                    self._closerange(start_fd, fd)
                     start_fd = fd + 1
             if start_fd <= MAXFD:
-                os.closerange(start_fd, MAXFD)
+                self._closerange(start_fd, MAXFD)
 
 
         def _execute_child(self, args, executable, preexec_fn, close_fds,

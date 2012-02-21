@@ -59,9 +59,9 @@ class BaseTestCase(unittest.TestCase):
 
     if not hasattr(unittest.TestCase, 'assertIn'):
         def assertIn(self, a, b, msg=None):
-            self.assert_((a in b), msg)
+            self.assert_((a in b), msg or ('%r not in %r' % (a, b)))
         def assertNotIn(self, a, b, msg=None):
-            self.assert_((a not in b), msg)
+            self.assert_((a not in b), msg or ('%r in %r' % (a, b)))
 
     def _addCleanup(self, function, *args, **kwargs):
         """Add a function, with arguments, to be called when the test is
@@ -366,22 +366,31 @@ class ProcessTestCase(BaseTestCase):
     def test_env(self):
         newenv = os.environ.copy()
         newenv["FRUIT"] = "orange"
-        with subprocess.Popen([sys.executable, "-c",
+        p = subprocess.Popen([sys.executable, "-c",
                                'import sys,os;'
                                'sys.stdout.write(os.getenv("FRUIT"))'],
                               stdout=subprocess.PIPE,
-                              env=newenv) as p:
+                              env=newenv)
+        try:
             stdout, stderr = p.communicate()
             self.assertEqual(stdout, "orange")
+        finally:
+            p.__exit__(None, None, None)
 
     def test_empty_env(self):
-        with subprocess.Popen([sys.executable, "-c",
-                               'import os; '
-                               'print(len(os.environ))'],
-                              stdout=subprocess.PIPE,
-                              env={}) as p:
+        # Note: This excludes some __CF_* and VERSIONER_* keys OS X insists
+        # on adding even when the environment in exec is empty.
+        p = subprocess.Popen(
+                [sys.executable, "-c",
+                 'import os; '
+                 'print([k for k in os.environ.keys() '
+                 '       if ("VERSIONER" not in k and "__CF" not in k)])'],
+                stdout=subprocess.PIPE, env={})
+        try:
             stdout, stderr = p.communicate()
-            self.assertEqual(stdout.strip(), "0")
+            self.assertEqual(stdout.strip(), "[]")
+        finally:
+            p.__exit__(None, None, None)
 
     def test_communicate_stdin(self):
         p = subprocess.Popen([sys.executable, "-c",
@@ -687,10 +696,13 @@ class ProcessTestCase(BaseTestCase):
         args = [sys.executable, "-c", 'import time; time.sleep(2)']
         for stream in ('stdout', 'stderr'):
             kw = {stream: subprocess.PIPE}
-            with subprocess.Popen(args, **kw) as process:
+            process = subprocess.Popen(args, **kw)
+            try:
                 signal.alarm(1)
                 # communicate() will be interrupted by SIGALRM
                 process.communicate()
+            finally:
+                process.__exit__(None, None, None)
 
 
 # context manager
@@ -1251,31 +1263,39 @@ class POSIXProcessTestCase(BaseTestCase):
             self.assertFalse(remaining_fds & to_be_closed,
                              "fd to be closed passed")
 
-            # pass_fds overrides close_fds with a warning.
-            if sys.version_info >= (2,7):  # assertWarns only in 2.7
-                with self.assertWarns(RuntimeWarning) as context:
-                    self.assertFalse(subprocess.call(
-                            [sys.executable, "-c", "import sys; sys.exit(0)"],
-                            close_fds=False, pass_fds=(fd, )))
-                self.assertIn('overriding close_fds', str(context.warning))
+            # Syntax requires Python 2.5, assertWarns requires Python 2.7.
+            #with self.assertWarns(RuntimeWarning) as context:
+            #    self.assertFalse(subprocess.call(
+            #            [sys.executable, "-c", "import sys; sys.exit(0)"],
+            #            close_fds=False, pass_fds=(fd, )))
+            #self.assertIn('overriding close_fds', str(context.warning))
 
     def test_stdout_stdin_are_single_inout_fd(self):
-        with open(os.devnull, "r+") as inout:
+        inout = open(os.devnull, "r+")
+        try:
             p = subprocess.Popen([sys.executable, "-c", "import sys; sys.exit(0)"],
                                  stdout=inout, stdin=inout)
             p.wait()
+        finally:
+            inout.close()
 
     def test_stdout_stderr_are_single_inout_fd(self):
-        with open(os.devnull, "r+") as inout:
+        inout = open(os.devnull, "r+")
+        try:
             p = subprocess.Popen([sys.executable, "-c", "import sys; sys.exit(0)"],
                                  stdout=inout, stderr=inout)
             p.wait()
+        finally:
+            inout.close()
 
     def test_stderr_stdin_are_single_inout_fd(self):
-        with open(os.devnull, "r+") as inout:
+        inout = open(os.devnull, "r+")
+        try:
             p = subprocess.Popen([sys.executable, "-c", "import sys; sys.exit(0)"],
                                  stderr=inout, stdin=inout)
             p.wait()
+        finally:
+            inout.close()
 
     def test_wait_when_sigchild_ignored(self):
         # NOTE: sigchild_ignore.py may not be an effective test on all OSes.
@@ -1344,10 +1364,10 @@ class POSIXProcessTestCase(BaseTestCase):
         # should trigger the wait() of p
         time.sleep(0.2)
         try:
-            with subprocess.Popen(['nonexisting_i_hope'],
+            proc = subprocess.Popen(['nonexisting_i_hope'],
                                   stdout=subprocess.PIPE,
-                                  stderr=subprocess.PIPE) as proc:
-                pass
+                                  stderr=subprocess.PIPE)
+            proc.__exit__(None, None, None)
         except EnvironmentError:
             pass
         else:
@@ -1575,42 +1595,48 @@ def reap_children():
 
 
 
-class ContextManagerTests(ProcessTestCase):
+class ContextManagerTests(BaseTestCase):
 
     def test_pipe(self):
-        with subprocess.Popen([sys.executable, "-c",
+        proc = subprocess.Popen([sys.executable, "-c",
                                "import sys;"
                                "sys.stdout.write('stdout');"
                                "sys.stderr.write('stderr');"],
                               stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE) as proc:
+                              stderr=subprocess.PIPE)
+        try:
             self.assertEqual(proc.stdout.read(), "stdout")
             self.assertStderrEqual(proc.stderr.read(), "stderr")
+        finally:
+            proc.__exit__(None, None, None)
 
         self.assertTrue(proc.stdout.closed)
         self.assertTrue(proc.stderr.closed)
 
     def test_returncode(self):
-        with subprocess.Popen([sys.executable, "-c",
-                               "import sys; sys.exit(100)"]) as proc:
-            pass
+        proc = subprocess.Popen([sys.executable, "-c",
+                               "import sys; sys.exit(100)"])
+        proc.__exit__(None, None, None)
         # __exit__ calls wait(), so the returncode should be set
         self.assertEqual(proc.returncode, 100)
 
     def test_communicate_stdin(self):
-        with subprocess.Popen([sys.executable, "-c",
+        proc = subprocess.Popen([sys.executable, "-c",
                               "import sys;"
                               "sys.exit(sys.stdin.read() == 'context')"],
-                             stdin=subprocess.PIPE) as proc:
+                             stdin=subprocess.PIPE)
+        try:
             proc.communicate("context")
             self.assertEqual(proc.returncode, 1)
+        finally:
+            proc.__exit__(None, None, None)
 
     def test_invalid_args(self):
         try:
-            with subprocess.Popen(['nonexisting_i_hope'],
+            proc = subprocess.Popen(['nonexisting_i_hope'],
                                   stdout=subprocess.PIPE,
-                                  stderr=subprocess.PIPE) as proc:
-                pass
+                                  stderr=subprocess.PIPE)
+            proc.__exit__(None, None, None)
         except EnvironmentError, exception:
             # ignore errors that indicate the command was not found
             if exception.errno not in (errno.ENOENT, errno.EACCES):
