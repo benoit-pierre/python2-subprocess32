@@ -192,8 +192,15 @@ _close_fds_by_brute_force(int start_fd, int end_fd, PyObject *py_fds_to_keep)
  * chooses to break compatibility with all existing binaries.  Highly Unlikely.
  */
 struct linux_dirent {
+#if defined(__x86_64__) && defined(__ILP32__)
+   /* Support the wacky x32 ABI (fake 32-bit userspace speaking to x86_64
+    * kernel interfaces) - https://sites.google.com/site/x32abi/ */
+   unsigned long long d_ino;
+   unsigned long long d_off;
+#else
    unsigned long  d_ino;        /* Inode number */
    unsigned long  d_off;        /* Offset to next linux_dirent */
+#endif
    unsigned short d_reclen;     /* Length of this linux_dirent */
    char           d_name[256];  /* Filename (null-terminated) */
 };
@@ -219,7 +226,18 @@ _close_open_fd_range_safe(int start_fd, int end_fd, PyObject* py_fds_to_keep)
     int fd_dir_fd;
     if (start_fd >= end_fd)
         return;
-        fd_dir_fd = open(FD_DIR, O_RDONLY | O_CLOEXEC, 0);
+#ifdef O_CLOEXEC
+    fd_dir_fd = open(FD_DIR, O_RDONLY | O_CLOEXEC, 0);
+#else
+    fd_dir_fd = open(FD_DIR, O_RDONLY, 0);
+#ifdef FD_CLOEXEC
+    {
+        int old = fcntl(fd_dir_fd, F_GETFD);
+        if (old != -1)
+            fcntl(fd_dir_fd, F_SETFD, old | FD_CLOEXEC);
+    }
+#endif
+#endif
     if (fd_dir_fd == -1) {
         /* No way to get a list of open fds. */
         _close_fds_by_brute_force(start_fd, end_fd, py_fds_to_keep);
